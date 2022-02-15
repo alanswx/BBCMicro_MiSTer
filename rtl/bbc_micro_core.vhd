@@ -162,7 +162,21 @@ entity bbc_micro_core is
 		sd_buff_addr   : in   std_logic_vector(8 downto 0);
 		sd_dout        : in   std_logic_vector(7 downto 0);
 		sd_din         : out  std_logic_vector(7 downto 0);
-		sd_dout_strobe : in   std_logic
+		sd_dout_strobe : in   std_logic;
+
+		-- CAS SIGNALS
+		TAPE_MOTOR     : out  std_logic;
+		TAPE_IN        : in  std_logic;
+		TAPE_OUT       : out  std_logic;
+
+		-- SERIAL SIGNALS
+		UART_TXD       :out  std_logic;
+		UART_RXD       :in  std_logic;
+		UART_RTS       :out  std_logic;
+		UART_CTS       :in  std_logic;
+		UART_DTR       :out  std_logic;
+		UART_DSR       :in  std_logic
+
 
 		
 		
@@ -171,6 +185,30 @@ end entity;
 
 architecture rtl of bbc_micro_core is
 
+	component acia_6850 is 
+		port (
+		clk : in std_logic;
+		reset : in std_logic;
+		cs : in std_logic;
+		e_clk : in std_logic;
+		rw_n : in std_logic;
+		rs: in std_logic;
+		data_in : in std_logic_vector(7 downto 0);
+		data_out : out std_logic_vector(7 downto 0);
+		data_en: out std_logic;
+		txclk: in std_logic;
+		rxclk: in std_logic;
+		rxdata: in std_logic;
+		cts_n: in std_logic;
+		dcd_n: in std_logic;
+		irq_n: out std_logic;
+		txdata: out std_logic;
+		rts_n: out std_logic
+	);
+	end component;
+
+
+	
 	 	component fdc1772 is
 		generic (
 			CLK_EN              : integer := 4000;  -- old values tried with different ram/success : 42666000 42800000 42680000 42856000
@@ -421,6 +459,30 @@ signal floppy_side      : std_logic;
 signal floppy_motor     : std_logic;
 signal floppy_reset     : std_logic;
 
+-- SERIAL ACIA 
+signal acia_do          : std_logic_vector(7 downto 0);
+signal acia_irq_n       : std_logic;
+signal acia_irq         : std_logic;
+
+signal acia_txd         : std_logic;
+signal acia_rxd         : std_logic;
+signal acia_rts_n       : std_logic;
+signal acia_cts         : std_logic;
+signal acia_dtr         : std_logic;
+signal acia_dsr         : std_logic;
+
+signal acia_txclk       : std_logic;
+signal acia_rxclk       : std_logic;
+
+
+-- SERPROC
+signal ser_rx_div       : integer;
+signal ser_tx_div       : integer;
+signal ser_rx_counter   : unsigned(12 downto 0);
+signal ser_tx_counter   : unsigned(12 downto 0);
+signal ser_enable       : std_logic;
+signal rx_div           : std_logic_vector(2 downto 0);
+signal tx_div           : std_logic_vector(2 downto 0);
 
 -- 0xFE34 Access Control
 signal acccon           : std_logic_vector(7 downto 0);
@@ -976,8 +1038,8 @@ begin
         sys_via_enable <= '0';
         user_via_enable <= '0';
         mouse_via_enable <= '0';
-		  fdc_enable<='0';
-		  fdcon_enable<='0';
+        fdc_enable<='0';
+        fdcon_enable<='0';
  --     adlc_enable <= '0';
         adc_enable <= '0';
         tube_enable <= '0';
@@ -1084,7 +1146,7 @@ begin
         ext_Dout       when ram_enable = '1' or rom_enable = '1' or mos_enable = '1' else
         crtc_do        when crtc_enable = '1' else
         adc_do         when adc_enable = '1' else
-        "00000010"     when acia_enable = '1' else
+        acia_do        when acia_enable = '1' else
         sys_via_do_r   when sys_via_enable = '1' else
         user_via_do_r  when user_via_enable = '1' else
         mouse_via_do_r when mouse_via_enable = '1' else
@@ -1094,14 +1156,18 @@ begin
         -- Master 128 additions
         romsel         when romsel_enable = '1' and m128_mode = '1' else
         fdc_do         when fdc_enable = '1' else
+        acia_do        when acia_enable = '1' else
         acccon         when acccon_enable = '1' and m128_mode = '1' else
         "11111110"     when io_sheila = '1' else
         "11111111"     when io_fred = '1' or io_jim = '1' else
         (others => '0'); -- un-decoded locations are pulled down by RP1
 
-    cpu_irq_n <= not (sys_via_irq or user_via_irq or mouse_via_irq or acc_irr) when m128_mode = '1' else
-                 not (sys_via_irq or user_via_irq or mouse_via_irq);
-	 cpu_nmi_n <= not fdc_irq and  not fdc_drq;
+
+    cpu_irq_n <= not (sys_via_irq or user_via_irq or mouse_via_irq or acc_irr or acia_irq) when m128_mode = '1' else
+                 not (sys_via_irq or user_via_irq or mouse_via_irq );
+    cpu_nmi_n <= not fdc_irq and  not fdc_drq;
+
+    acia_irq <= not acia_irq_n;
 
     -- Synchronous outputs to External Memory
 
@@ -1237,7 +1303,6 @@ begin
     end process;
 
 	 -- FDC (Master)
-
 	fdc : fdc1772
 	port map
 	(
@@ -1318,9 +1383,100 @@ begin
         end if;
     end process;
 
+-- serial ULA,  SHEILA at address &FE10
+-- SERPROC
+-- b7	                              b6	b5,	b4,	b3	b2,	b1,	b0
+-- Cassette motor on	Serial port enabled	Receive clock rate	Transmit clock rate
+    process(clock_32, reset_n)
+    begin
+        if rising_edge(clock_32) then
+           ser_rx_counter<=ser_rx_counter+1;
+           ser_tx_counter<=ser_tx_counter+1;
+	   if (cpu_clken) then
+		if serproc_enable = '1' then
+			TAPE_MOTOR<= cpu_do(7);
+			ser_enable <= cpu_do(6);
+			rx_div <= cpu_do(5 downto 3);
+			tx_div <= cpu_do(2 downto 0);
+		end if;
+	   end if;
+
+           -- 32MHZ / 26 = 1228.8 kHz (19200 bps)
+	   -- 32MHZ / 52 = 614.4 kHz
+	   -- 32MHZ / 104 = 307.2 kHz	
+	   -- 32MHZ / 208 153.6 kHz
+	   -- 32MHZ / 417 76.8 1200bps
+	   -- 32MHZ / 1 666.6  300bps
+	   -- 32MHZ / 3 333.33333
+	   -- 32MHZ / 6 666.66667
+	  if (ser_rx_counter = ser_rx_div) then
+	  	acia_rxclk <= not acia_rxclk;
+	 	ser_rx_counter <= (others => '0');
+	  end if;
+	  if (ser_enable) then
+	   case rx_div is
+		   when "000" => ser_rx_div <= 26;
+		   when "100" => ser_rx_div <= 52;
+		   when "010" => ser_rx_div <= 104;
+		   when "001" => ser_rx_div <= 208;
+		   when "101" => ser_rx_div <= 417;
+		   when "011" => ser_rx_div <= 3333;
+		   when "111" => ser_rx_div <= 6667;
+		   when others => ser_rx_div <= 26;
+	   end case;
+   else -- if tape mode, receive is always 19200
+	     ser_rx_div <= 26;
+          end if;
+	  if (ser_tx_counter = ser_tx_div) then
+	  	acia_txclk <= not acia_txclk;
+	 	ser_tx_counter <= (others => '0');
+	  end if;
+	   case tx_div is
+		   when "000" => ser_tx_div <= 26;
+		   when "100" => ser_tx_div <= 52;
+		   when "010" => ser_tx_div <= 104;
+		   when "001" => ser_tx_div <= 208;
+		   when "101" => ser_tx_div <= 417;
+		   when "011" => ser_tx_div <= 3333;
+		   when "111" => ser_tx_div <= 6667;
+		   when others => ser_tx_div <= 26;
+	   end case;
+        end if;
+    end process;
+
+-- MUX in the ACIA from cassette inputs or 
+
+UART_TXD <= acia_txd when ser_enable else '0';
+TAPE_OUT <= acia_txd when not ser_enable else '0';
+acia_rxd <= UART_RXD when ser_enable else TAPE_IN;
+acia_cts <= UART_CTS when ser_enable else '1';
+acia_dsr <= UART_DSR when ser_enable else '1';
+UART_RTS <= not acia_rts_n when ser_enable else '0';
+UART_DTR <= '1' when ser_enable else '0';
 
 
+	acia : acia_6850 port map
+	(
+		-- The following signals are all passed : in std_logic;
+                clk => clock_32, -- not sure if this is correct
+		reset => not reset_n,
+		cs => acia_enable, -- set to 1?
+		e_clk => mhz1_clken,
+   		rs => cpu_a(0), -- register select A(0)
+		rw_n=> cpu_r_nw,
+		data_out=> acia_do,
+		data_in=> cpu_do,
 
+		--data_en: out std_logic;
+		txclk  => acia_txclk,
+		rxclk  => acia_rxclk,
+		rxdata => acia_rxd,
+		cts_n => not acia_cts,
+		dcd_n => not acia_dsr,
+		irq_n => acia_irq_n,
+		txdata => acia_txd,
+		rts_n => acia_rts_n
+	);
 
 	 
 	 

@@ -173,7 +173,6 @@ module emu
 
 assign ADC_BUS  = 'Z;
 assign USER_OUT = '1;
-assign {UART_RTS, UART_TXD, UART_DTR} = 0;
 assign {SDRAM_DQ, SDRAM_A, SDRAM_BA, SDRAM_CLK, SDRAM_CKE, SDRAM_DQML, SDRAM_DQMH, SDRAM_nWE, SDRAM_nCAS, SDRAM_nRAS, SDRAM_nCS} = 'Z;
 assign {DDRAM_CLK, DDRAM_BURSTCNT, DDRAM_ADDR, DDRAM_DIN, DDRAM_BE, DDRAM_RD, DDRAM_WE} = 0;
  
@@ -199,7 +198,7 @@ video_freak video_freak
 
 `include "build_id.v" 
 parameter CONF_STR = {
-	"BBCMicro;;",
+	"BBCMicro;UART19200:9600:4800:2400:1200:300;",
 	"-;",
 	"S0,VHD;",
 	"H0S1,SSDDSD;",
@@ -530,7 +529,15 @@ bbc_micro_core BBCMicro
 	.sd_buff_addr   ( sd_buff_addr[8:0]   ),
 	.sd_dout        ( sd_buff_dout   ),
 	.sd_din         ( fd_sd_buff_din ),
-	.sd_dout_strobe ( sd_buff_wr )
+	.sd_dout_strobe ( sd_buff_wr ),
+
+	.UART_TXD(UART_TXD),
+	.UART_RXD(UART_RXD),
+	.UART_RTS(UART_RTS),
+	.UART_CTS(UART_CTS),
+	.UART_DTR(UART_DTR),
+	.UART_DSR(UART_DSR)
+
 
 
 );
